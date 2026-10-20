@@ -1,6 +1,16 @@
 # SketchToUI
 
+[![CI](https://github.com/fjl-gj/sketchtoui/actions/workflows/ci.yml/badge.svg)](https://github.com/fjl-gj/sketchtoui/actions/workflows/ci.yml)
+
+**Sketch designs → browser canvas → AI design context.**
+
+Import `.sketch` files into a React workspace, inspect artboards and layers, and share structured design context, assets, and previews with AI clients through an authenticated, read-only Remote MCP server.
+
 将 Sketch 设计文件导入浏览器工作台，查看设计页面、图层、文字和图片，并通过带认证的 Remote MCP 将设计上下文提供给 AI 客户端。
+
+[快速开始](#快速开始windows-powershell) · [一键启停](#一键启停) · [MCP 接入](REMOTE_MCP.md) · [架构文档](docs/02_ARCHITECTURE.md) · [贡献指南](CONTRIBUTING.md)
+
+项目当前提供设计解析、浏览和上下文读取能力；生产代码生成由连接的 AI 客户端根据设计上下文完成。
 
 ## 功能
 
@@ -10,6 +20,21 @@
 - 将原始文件、图片和解析结果保存至 MinIO。
 - 创建、禁用和撤销个人 MCP Token，通过只读工具和 `sketchtoui://` Resource 读取设计数据。
 - 获取画板预览、设计规范、重复组件候选，以及文本布局和图层重叠分析。
+
+## 工作方式
+
+```mermaid
+flowchart LR
+    Design["Sketch 文件"] --> Web["浏览器工作台"]
+    Web --> API["Flask API 与后台解析"]
+    API --> DB["SQLite / MySQL：账号与项目索引"]
+    API --> Cache["Redis：会话与任务进度"]
+    API --> Storage["MinIO：设计、图层数据与图片"]
+    Client["AI 客户端 + 个人 Token"] --> MCP["只读 Remote MCP"]
+    MCP --> DB
+    MCP --> Cache
+    MCP --> Storage
+```
 
 ## 技术栈与依赖
 
@@ -26,9 +51,11 @@
 
 ## 快速开始（Windows PowerShell）
 
-在克隆后的仓库根目录执行：
+先克隆项目，再在仓库根目录安装依赖：
 
 ```powershell
+git clone https://github.com/fjl-gj/sketchtoui.git
+cd sketchtoui
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 npm --prefix canvas-react ci
