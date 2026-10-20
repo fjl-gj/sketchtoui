@@ -1,0 +1,28 @@
+{
+  "name": "canvas-react",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:api": "python ../backend/main.py",
+    "serve": "npm run build && python ../backend/main.py",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "sync:canvas": "powershell -ExecutionPolicy Bypass -File scripts/sync-canvas.ps1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1"
+  },
+  "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/icons-material": "^9.2.0",
+    "@mui/material": "^9.2.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  }
+}

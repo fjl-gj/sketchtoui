@@ -1,0 +1,54 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime state and databases
+/data/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Python environments and test output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Frontend dependencies and build output
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Private design inputs and generated previews (keep locally)
+/fixtures/sketch/
+/canvas-react/public/canvas/
+/canvas-react/public/sketch/
+*.sketch
+
+# Temporary scripts, deployment archives and diagnostics
+/.tmp_*/
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# Local editor and assistant state
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+/.agents/
+/.claude/
+/.codex/
+/.cursor/
+/.trellis/
+/AGENTS.md
