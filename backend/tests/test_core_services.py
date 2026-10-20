@@ -105,7 +105,7 @@ class CoreServiceTests(unittest.TestCase):
         user = {"id": "user", "email": "user@example.com", "username": "user", "phone": None, "password_hash": hash_password("Password1"), "email_verified": 1, "email_verified_at": "now", "status": "active", "last_login_at": None, "created_at": "created", "updated_at": "updated"}
         database = Mock()
         database.one.side_effect = [None, user]
-        with patch.object(auth_module, "get_database", return_value=database), patch.object(auth_module, "get_redis", return_value=redis), patch.object(auth_module, "verify_registration_code") as verify_code, patch.object(auth_module, "issue_session", return_value="session"):
+        with patch.object(auth_module, "get_database", return_value=database), patch.object(auth_module, "get_cache", return_value=redis), patch.object(auth_module, "verify_registration_code") as verify_code, patch.object(auth_module, "issue_session", return_value="session"):
             registered, session = AuthService().register({"email": "NEW@example.com", "username": "new_user", "password": "Password1", "code": "123456"})
             logged_in, logged_session = AuthService().login({"identity": "user@example.com", "password": "Password1"})
 
@@ -122,18 +122,18 @@ class CoreServiceTests(unittest.TestCase):
 
         redis.set(auth_module.session_key("session"), "user", ex=10)
         with Flask(__name__).test_request_context("/", headers={"Cookie": f"{auth_module.SESSION_COOKIE}=session"}):
-            with patch.object(auth_module, "get_database", return_value=SimpleNamespace(one=lambda *_args: user)), patch.object(auth_module, "get_redis", return_value=redis):
+            with patch.object(auth_module, "get_database", return_value=SimpleNamespace(one=lambda *_args: user)), patch.object(auth_module, "get_cache", return_value=redis):
                 self.assertEqual(current_user(request, require_verified=True)["id"], "user")
         response = apply_session_cookie(Flask(__name__).response_class(), "session", 10)
         self.assertIn(auth_module.SESSION_COOKIE, response.headers["Set-Cookie"])
-        with patch.object(auth_module, "get_redis", return_value=redis):
+        with patch.object(auth_module, "get_cache", return_value=redis):
             self.assertTrue(issue_session("user"))
 
     def test_verification_code_success_failure_and_cooldown(self) -> None:
         redis = MemoryRedis()
         email = "user@example.com"
         redis.set(auth_module.verification_key(email), json.dumps({"hash": code_hash("123456"), "attempts": 0}), ex=30)
-        with patch.object(auth_module, "get_redis", return_value=redis):
+        with patch.object(auth_module, "get_cache", return_value=redis):
             verify_registration_code(email, "123456")
             self.assertIsNone(redis.get(auth_module.verification_key(email)))
             with self.assertRaises(ApiError):
@@ -141,7 +141,7 @@ class CoreServiceTests(unittest.TestCase):
             redis.set(auth_module.verification_key(email), json.dumps({"hash": code_hash("123456"), "attempts": 0}), ex=30)
             with self.assertRaises(ApiError):
                 verify_registration_code(email, "000000")
-        with patch.object(auth_module, "get_redis", return_value=redis), patch.object(auth_module, "settings", SimpleNamespace(email_delivery="console")):
+        with patch.object(auth_module, "get_cache", return_value=redis), patch.object(auth_module, "settings", SimpleNamespace(email_delivery="console")):
             auth_module.send_verification_email(email, "user")
             with self.assertRaises(ApiError):
                 auth_module.send_verification_email(email, "user")
@@ -155,11 +155,11 @@ class CoreServiceTests(unittest.TestCase):
         redis = MemoryRedis()
         email = "user@example.com"
         redis.set(auth_module.verification_key(email), json.dumps({"hash": code_hash("123456"), "attempts": auth_module.MAX_VERIFY_ATTEMPTS}), ex=10)
-        with patch.object(auth_module, "get_redis", return_value=redis), self.assertRaises(ApiError):
+        with patch.object(auth_module, "get_cache", return_value=redis), self.assertRaises(ApiError):
             verify_registration_code(email, "123456")
 
         missing_smtp = SimpleNamespace(email_delivery="smtp", smtp_host="", smtp_sender="", smtp_use_ssl=False)
-        with patch.object(auth_module, "get_redis", return_value=MemoryRedis()), patch.object(auth_module, "settings", missing_smtp), self.assertRaises(ApiError):
+        with patch.object(auth_module, "get_cache", return_value=MemoryRedis()), patch.object(auth_module, "settings", missing_smtp), self.assertRaises(ApiError):
             auth_module.send_verification_email(email, "user")
 
         smtp_client = Mock()
@@ -169,21 +169,21 @@ class CoreServiceTests(unittest.TestCase):
             email_delivery="smtp", smtp_host="smtp.example.com", smtp_sender="noreply@example.com", smtp_use_ssl=False,
             smtp_use_tls=True, smtp_username="user", smtp_password="secret", smtp_port=587,
         )
-        with patch.object(auth_module, "get_redis", return_value=MemoryRedis()), patch.object(auth_module, "settings", smtp_settings), patch.object(auth_module.smtplib, "SMTP", return_value=smtp_client):
+        with patch.object(auth_module, "get_cache", return_value=MemoryRedis()), patch.object(auth_module, "settings", smtp_settings), patch.object(auth_module.smtplib, "SMTP", return_value=smtp_client):
             auth_module.send_verification_email(email, "user")
         smtp_client.starttls.assert_called_once()
         smtp_client.login.assert_called_once_with("user", "secret")
         smtp_client.send_message.assert_called_once()
 
         error_redis = MemoryRedis()
-        with patch.object(auth_module, "get_redis", return_value=error_redis), patch.object(auth_module, "settings", smtp_settings), patch.object(auth_module.smtplib, "SMTP", side_effect=OSError("offline")), self.assertRaises(ApiError):
+        with patch.object(auth_module, "get_cache", return_value=error_redis), patch.object(auth_module, "settings", smtp_settings), patch.object(auth_module.smtplib, "SMTP", side_effect=OSError("offline")), self.assertRaises(ApiError):
             auth_module.send_verification_email(email, "user")
 
         disabled_user = {"id": "user", "email": email, "username": "user", "email_verified": 0, "status": "disabled", "created_at": "created"}
         redis = MemoryRedis()
         redis.set(auth_module.session_key("session"), "user", ex=10)
         with Flask(__name__).test_request_context("/", headers={"Cookie": f"{auth_module.SESSION_COOKIE}=session"}):
-            with patch.object(auth_module, "get_database", return_value=SimpleNamespace(one=lambda *_args: disabled_user)), patch.object(auth_module, "get_redis", return_value=redis), self.assertRaises(ApiError):
+            with patch.object(auth_module, "get_database", return_value=SimpleNamespace(one=lambda *_args: disabled_user)), patch.object(auth_module, "get_cache", return_value=redis), self.assertRaises(ApiError):
                 current_user(request)
 
         database = Mock()
@@ -213,7 +213,7 @@ class CoreServiceTests(unittest.TestCase):
 
         redis = MemoryRedis()
         middleware = McpRateLimitMiddleware(lambda _scope, _receive, _send: None, "/mcp", 1, 2)
-        with patch.object(rate_module, "get_redis", return_value=redis):
+        with patch.object(rate_module, "get_cache", return_value=redis):
             self.assertTrue(middleware.consume("Bearer abc")[0])
             self.assertFalse(middleware.consume("Bearer abc")[0])
             request = Request({"type": "http", "method": "GET", "path": "/other", "headers": [], "scheme": "http", "server": ("test", 80), "client": ("test", 1), "query_string": b""})

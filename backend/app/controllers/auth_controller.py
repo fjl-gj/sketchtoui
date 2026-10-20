@@ -46,8 +46,8 @@ def logout():
     try:
         session_id = request.cookies.get(SESSION_COOKIE)
         if session_id:
-            from ..common.extensions import get_redis
-            get_redis().delete(session_key(session_id))
+            from ..common.extensions import get_cache
+            get_cache().delete(session_key(session_id))
     except ApiError:
         pass
     return apply_session_cookie(jsonify({"ok": True}), "", 0)

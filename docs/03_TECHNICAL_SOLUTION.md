@@ -27,7 +27,7 @@ backend/
     controllers/             # HTTP 协议、参数解析、响应
     services/                # 业务编排与领域能力
     mcp/                     # MCP 验证、限流、Tool/Resource 注册
-    common/                  # 数据库、Redis、MinIO、错误响应
+    common/                  # 数据库、内存/Redis 缓存、本地/MinIO 存储、错误响应
     config/                  # 环境配置
   sketch_to_*.py             # Sketch 解析、分析、转换核心
 ```
@@ -38,7 +38,7 @@ backend/
 
 | 服务 | 职责 | 输入 | 输出 |
 | --- | --- | --- | --- |
-| `AuthService` | 注册、验证码、密码验证、Session。 | 邮箱、用户名、密码、验证码。 | 用户与 Redis Session。 |
+| `AuthService` | 注册、验证码、密码验证、Session。 | 邮箱、用户名、密码、验证码。 | 用户与缓存 Session（内存 / Redis）。 |
 | `ProjectImportService` | 上传、任务创建、项目查询、删除、对象读取。 | 用户、文件流、项目 ID。 | 项目、导入状态、受控对象内容。 |
 | `SketchParser`（目标抽象） | 解压、页面定位、节点规范化、资源关联。 | 解压后的 Sketch 目录。 | 统一设计文档模型。 |
 | `CanvasBuilder`（目标抽象） | 平台分类、manifest、Canvas JSON。 | 设计文档模型。 | 分组 Canvas 数据。 |
@@ -106,7 +106,7 @@ erDiagram
 | 表 | 用途 | 核心字段 |
 | --- | --- | --- |
 | `project_versions` | 标识重新导入版本、源文件哈希和该版本存储占用。 | `project_id`、`filename`、`source_sha256`、`version_number`、`total_bytes`、`status`。 |
-| `import_jobs` | 保留失败原因与耗时；Redis 仍保存实时进度。 | `id`、`project_id`、`project_version_id`、`status`、`error_message`。 |
+| `import_jobs` | 保留失败原因与耗时；所选缓存保存实时进度。 | `id`、`project_id`、`project_version_id`、`status`、`error_message`。 |
 
 `users` 通过同一轮迁移增加 `phone`、`email_verified`、`email_verified_at`、`status`、`last_login_at` 和 `updated_at`；`projects.source_filename` 重命名为 `filename`。
 
@@ -116,7 +116,7 @@ P2 商业化阶段使用 Alembic 单独新增 `plans`、`subscriptions`、`payme
 
 ### 4.1 当前阶段要求
 
-Flask API 保存上传文件、写入 `import_jobs` 后提交到进程内 `ThreadPoolExecutor`；解析、上传均在后台任务中执行，Redis 仅保存实时进度。默认串行解析，可通过 `IMPORT_MAX_WORKERS` 按服务器 CPU/内存情况调整。新建项目先创建逻辑项目与 `v1`；重新导入通过 `POST /api/projects/{project_id}/versions` 创建 `vN`，解析、上传全部成功后才将 `projects.current_version_id` 切换到新版本。因此新版本失败时，Web 画布、MCP 和资源读取继续使用原版本。
+Flask API 保存上传文件、写入 `import_jobs` 后提交到进程内 `ThreadPoolExecutor`；解析、保存均在后台任务中执行，所选内存缓存或 Redis 保存实时进度。默认串行解析，可通过 `IMPORT_MAX_WORKERS` 按服务器 CPU/内存情况调整。新建项目先创建逻辑项目与 `v1`；重新导入通过 `POST /api/projects/{project_id}/versions` 创建 `vN`，解析、文件保存全部成功后才将 `projects.current_version_id` 切换到新版本。因此新版本失败时，Web 画布、MCP 和资源读取继续使用原版本。
 
 当前实现已保证：
 
@@ -124,7 +124,7 @@ Flask API 保存上传文件、写入 `import_jobs` 后提交到进程内 `Threa
 - 解压使用流式写入，拒绝 Zip Slip、绝对/盘符路径、符号链接、加密条目和无效 ZIP；
 - Canvas 按 Sketch 同级图层的 `hasClippingMask` / `shouldBreakMaskChain` 维护遮罩链，支持矩形、圆形和 Shape Path 遮罩的旋转、翻转与圆角裁剪；
 - 无论成功、失败或异常，临时目录均会清理；
-- 上传 MinIO 过程中失败时，会清理该失败版本专属对象前缀，不会触碰项目当前可用版本；
+- 保存到本地目录或 MinIO 过程中失败时，会清理该失败版本专属对象前缀，不会触碰项目当前可用版本；
 - 解析异常写入用户可读的导入失败状态；
 - 同一项目旧导入结果不得覆盖新导入中的结果。
 
@@ -136,7 +136,7 @@ flowchart LR
     Task --> Parse["安全解压 + Sketch 解析"]
     Parse --> Store[("对象存储")]
     Parse --> DB[("MySQL")]
-    Task --> Progress[("Redis 导入进度")]
+    Task --> Progress[("内存 / Redis 导入进度")]
     API --> Progress
 ```
 
@@ -282,7 +282,7 @@ manifest.group.platform = desktop | mobile | plugin
 Authorization: Bearer skt_...
   → SHA-256 哈希查询 mcp_tokens
   → 检查 enabled、revoked_at、所属 user_id
-  → Redis 全局 + Token 限流
+  → 所选缓存的全局 + Token 限流（内存模式仅限当前 MCP 进程）
   → 执行 Tool / Resource
 ```
 
@@ -316,7 +316,7 @@ URI 参数全部 URL 编码；服务端解析 URI 后必须再次校验项目归
 
 | 领域 | 主要接口 | 规则 |
 | --- | --- | --- |
-| 认证 | `/api/auth/*` | JSON 响应；Session Cookie；验证码只在 Redis。 |
+| 认证 | `/api/auth/*` | JSON 响应；Session Cookie；验证码只在带 TTL 的内存缓存 / Redis。 |
 | 项目 | `/api/projects`、`/api/imports/{job-id}` | 导入返回 `202 + jobId`；前端轮询进度。 |
 | 画布 | `/api/projects/{id}/manifest`、`/canvas/...` | 每次读取先校验项目归属。 |
 | 资源 | `/api/projects/{id}/assets/...` | 使用受控相对路径，不接受对象存储绝对路径。 |
@@ -337,7 +337,7 @@ URI 参数全部 URL 编码；服务端解析 URI 后必须再次校验项目归
 | --- | --- |
 | 解析单元测试 | Frame、Text Run、颜色、Path、资源引用、平台分类。 |
 | Fixture 回归测试 | UUID、预览图、目录分组、manifest 输出固定断言。 |
-| API 集成测试 | 注册、Redis 验证码、项目归属、资源读取、Token 启停、跨用户拒绝。 |
+| API 集成测试 | 注册、缓存验证码、项目归属、资源读取、Token 启停、跨用户拒绝；无外部服务的内存 / 本地存储闭环。 |
 | MCP 集成测试 | Bearer 鉴权、URI 编码、预览图片、限流、跨项目访问拒绝。 |
 | 前端交互测试 | 画板切换、视口保持、图层虚拟化、选中同步。 |
 

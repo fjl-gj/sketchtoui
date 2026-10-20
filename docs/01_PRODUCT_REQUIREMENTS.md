@@ -84,7 +84,7 @@ SketchToUI 是面向既有 Sketch 设计稿的 Web 平台与 Remote MCP 服务�
 ### 5.1 注册与登录（P0）
 
 - 采用用户名、邮箱、密码注册；用户名唯一、邮箱唯一。
-- 邮箱验证码必须仅保存在 Redis，不创建“邮箱验证码”数据库表。
+- 邮箱验证码仅保存在带 TTL 的缓存（默认内存，可选 Redis），不创建“邮箱验证码”数据库表。
 - 验证码有效期 10 分钟；发送按钮有 60 秒倒计时和重发冷却。
 - 注册、验证码输入与验证应在同一认证卡片内完成，不跳转到另一页面或路由。
 - 发送成功、失败、注册成功等状态应使用页面顶部 Toast/消息提示，而不是挤入表单正文。
@@ -94,7 +94,7 @@ SketchToUI 是面向既有 Sketch 设计稿的 Web 平台与 Remote MCP 服务�
 
 ### 5.2 Session 与安全（P0）
 
-- 登录 Session 存在 Redis，自动过期；退出登录后立即删除 Session。
+- 登录 Session 存在所选缓存，自动过期；退出登录后立即删除 Session。默认内存模式下重启会失效，多 Web 进程部署使用 Redis 共享会话。
 - Cookie 使用 `HttpOnly`、HTTPS 生产环境下 `Secure`、`SameSite=Lax`。
 - 所有项目、资源、MCP Token 操作均必须从当前 Session / Bearer Token 派生用户 ID，禁止信任客户端传入的用户 ID。
 
@@ -267,8 +267,8 @@ SketchToUI 是面向既有 Sketch 设计稿的 Web 平台与 Remote MCP 服务�
 - 前端：React + TypeScript + MUI；生产页面应优先 React 交互体验。
 - 后端：Flask；MCP：独立 Uvicorn Streamable HTTP 服务。
 - 数据库：开发可用 SQLite，生产迁移至 MySQL；数据库结构升级使用 Alembic。
-- Redis：Session、邮箱验证码、重发冷却、导入进度、限流和后续任务队列。
-- 对象存储：当前使用 MinIO/S3 API 保存源 Sketch、解压数据、资源和 Canvas JSON；后续对接 OSS 时必须完成兼容性验证。
+- 缓存：默认进程内内存，可选 Redis，保存 Session、邮箱验证码、重发冷却、导入进度与限流；多实例使用 Redis 共享状态。
+- 文件存储：默认本地 `data/storage`，可选 MinIO，保存源 Sketch、解压数据、资源和 Canvas JSON；Web 与 MCP 共享同一存储。后续对接 OSS 时必须完成兼容性验证。
 - 大文件解析应最终使用 Redis 驱动的独立 Worker；不能长期依赖 Web 服务进程内线程。
 - 生产环境使用 HTTPS、反向代理和原生进程守护；Docker 不是当前强制要求。
 

@@ -45,7 +45,7 @@ class ControllerTests(unittest.TestCase):
         service.register.return_value = (USER, "session")
         service.login.return_value = (USER, "session")
         app = application()
-        with patch.object(auth_controller, "service", service), patch.object(auth_controller, "current_user", return_value=USER), patch("app.common.extensions.get_redis", return_value=Mock()):
+        with patch.object(auth_controller, "service", service), patch.object(auth_controller, "current_user", return_value=USER), patch("app.common.extensions.get_cache", return_value=Mock()):
             client = app.test_client()
             self.assertEqual(client.get("/api/auth/me").get_json()["user"]["id"], "user")
             self.assertEqual(client.post("/api/auth/send-verification", json={"email": "user@example.com"}).status_code, 200)
@@ -98,9 +98,9 @@ class ControllerTests(unittest.TestCase):
 
     def test_health_endpoint(self) -> None:
         app = application()
-        with patch.object(health_controller, "settings", SimpleNamespace(database_dsn="sqlite:///data/test.db", minio_bucket="bucket")):
+        with patch.object(health_controller, "settings", SimpleNamespace(database_dsn="sqlite:///data/test.db", cache_backend="redis", storage_backend="minio", minio_bucket="bucket")):
             payload = app.test_client().get("/api/health").get_json()
-        self.assertEqual(payload, {"status": "ok", "databaseBackend": "sqlite", "storageBackend": "minio", "minioBucket": "bucket"})
+        self.assertEqual(payload, {"status": "ok", "databaseBackend": "sqlite", "cacheBackend": "redis", "storageBackend": "minio", "minioBucket": "bucket"})
 
 
 if __name__ == "__main__":

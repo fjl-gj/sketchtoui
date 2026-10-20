@@ -4,7 +4,6 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import logging
-import mimetypes
 import os
 import re
 import shutil
@@ -14,10 +13,8 @@ import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, BinaryIO
 
-from minio.error import S3Error
-
 from ..common.errors import ApiError
-from ..common.extensions import get_database, get_minio, get_redis
+from ..common.extensions import get_cache, get_database, get_storage
 from ..config.settings import ROOT_DIR, settings
 from .auth_service import iso_now
 from sketch_to_canvas_site import generate_canvas_site
@@ -162,7 +159,7 @@ def directory_bytes(path: Path) -> int:
 
 
 def get_job(job_id: str) -> dict[str, Any]:
-    raw = get_redis().get(job_key(job_id))
+    raw = get_cache().get(job_key(job_id))
     if raw:
         return json.loads(raw)
     record = get_database().one(
@@ -199,7 +196,7 @@ def get_job(job_id: str) -> dict[str, Any]:
 def update_job(job_id: str, **updates: Any) -> None:
     job = get_job(job_id)
     job.update(updates)
-    get_redis().set(job_key(job_id), json.dumps(job, ensure_ascii=False), ex=JOB_TTL_SECONDS)
+    get_cache().set(job_key(job_id), json.dumps(job, ensure_ascii=False), ex=JOB_TTL_SECONDS)
     stage = str(job["stage"])
     status = {"queued": "queued", "complete": "succeeded", "failed": "failed"}.get(stage, "running")
     now = iso_now()
@@ -225,19 +222,16 @@ def update_job(job_id: str, **updates: Any) -> None:
 
 
 def upload_tree(local_dir: Path, prefix: str) -> None:
-    client = get_minio()
+    client = get_storage()
     for file_path in local_dir.rglob("*"):
         if not file_path.is_file():
             continue
         relative_path = file_path.relative_to(local_dir).as_posix()
-        content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-        client.fput_object(settings.minio_bucket, f"{prefix}/{relative_path}", str(file_path), content_type=content_type)
+        client.put_file(f"{prefix}/{relative_path}", file_path)
 
 
 def remove_object_tree(prefix: str) -> None:
-    client = get_minio()
-    for item in client.list_objects(settings.minio_bucket, prefix=f"{prefix}/", recursive=True):
-        client.remove_object(settings.minio_bucket, item.object_name)
+    get_storage().delete_prefix(prefix)
 
 
 def process_import(job_id: str, user_id: str, project: dict[str, Any], version: dict[str, Any], temp_dir: Path) -> bool:
@@ -251,7 +245,7 @@ def process_import(job_id: str, user_id: str, project: dict[str, Any], version: 
             update_job(job_id, stage="parsing", progress=45 + round(completed / max(1, total) * 45), message=f"正在解析分组：{group_name}")
 
         groups = generate_canvas_site(temp_dir / "sketch", temp_dir / "canvas", progress_callback=report)
-        update_job(job_id, stage="uploading", progress=92, message="正在上传文件到 MinIO")
+        update_job(job_id, stage="uploading", progress=92, message="正在保存项目文件")
         upload_tree(temp_dir, version["object_prefix"])
         project["group_count"] = len(groups)
         artboard_count = sum(group["artboardCount"] for group in groups)
@@ -383,7 +377,7 @@ def resume_pending_import_jobs() -> int:
            WHERE status = 'running'"""
     )
     for job in interrupted_jobs:
-        get_redis().set(
+        get_cache().set(
             job_key(job["id"]),
             json.dumps({"id": job["id"], "userId": job["user_id"], "stage": "queued", "progress": 5, "message": "服务已恢复，等待重新处理"}, ensure_ascii=False),
             ex=JOB_TTL_SECONDS,
@@ -486,10 +480,10 @@ class ProjectImportService:
             raise
         job = {"id": job_id, "userId": user_id, "stage": "queued", "progress": 5, "message": "文件已接收，等待开始解析"}
         try:
-            get_redis().set(job_key(job_id), json.dumps(job, ensure_ascii=False), ex=JOB_TTL_SECONDS)
+            get_cache().set(job_key(job_id), json.dumps(job, ensure_ascii=False), ex=JOB_TTL_SECONDS)
             submit_import_job(job_id)
         except Exception:
-            get_redis().delete(job_key(job_id))
+            get_cache().delete(job_key(job_id))
             database.execute("DELETE FROM import_jobs WHERE id = ?", (job_id,))
             database.execute("DELETE FROM project_versions WHERE id = ?", (version_id,))
             database.execute("DELETE FROM projects WHERE id = ? AND user_id = ?", (project_id, user_id))
@@ -569,10 +563,10 @@ class ProjectImportService:
 
         job = {"id": job_id, "userId": user_id, "stage": "queued", "progress": 5, "message": "新版本文件已接收，等待开始解析"}
         try:
-            get_redis().set(job_key(job_id), json.dumps(job, ensure_ascii=False), ex=JOB_TTL_SECONDS)
+            get_cache().set(job_key(job_id), json.dumps(job, ensure_ascii=False), ex=JOB_TTL_SECONDS)
             submit_import_job(job_id)
         except Exception:
-            get_redis().delete(job_key(job_id))
+            get_cache().delete(job_key(job_id))
             database.execute("DELETE FROM import_jobs WHERE id = ?", (job_id,))
             database.execute("DELETE FROM project_versions WHERE id = ?", (version_id,))
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -637,13 +631,6 @@ class ProjectImportService:
     def read_object(self, user_id: str, project_id: str, relative_path: str) -> tuple[bytes, str]:
         object_name = self.object_name(user_id, project_id, relative_path)
         try:
-            response = get_minio().get_object(settings.minio_bucket, object_name)
-        except S3Error as error:
-            if error.code in {"NoSuchKey", "NoSuchObject", "NoSuchBucket"}:
-                raise ApiError("请求的项目文件不存在", 404) from error
-            raise
-        try:
-            return response.read(), response.headers.get("Content-Type", mimetypes.guess_type(relative_path)[0] or "application/octet-stream")
-        finally:
-            response.close()
-            response.release_conn()
+            return get_storage().read_object(object_name)
+        except FileNotFoundError as error:
+            raise ApiError("请求的项目文件不存在", 404) from error

@@ -1,12 +1,14 @@
 # SketchToUI 架构设计
 
 > 版本：v1.0\
-> 更新日期：2026-07-13\
+> 更新日期：2026-10-20\
 > 需求基线：[产品需求文档](01_PRODUCT_REQUIREMENTS.md) · [数据库表结构](05_DATABASE_SCHEMA.md)
 
 ## 1. 架构目标
 
 SketchToUI 的架构首先服务于设计上下文质量，而不是先服务于支付或团队功能。
+
+默认单机运行使用 SQLite、进程内内存缓存和本地 `data/storage`，无需 Redis、MinIO。多实例部署可选择 Redis 共享会话与限流，文件使用共享持久卷或 MinIO；下文公网部署图展示外部依赖方案。内存缓存重启后失效，MCP Token 与项目索引仍在数据库中；Web、MCP 的本地文件目录必须一致。
 
 1. **可信解析**：稳定提取 Sketch 的页面、画板、图层、文本、样式、资源和 Path 数据。
 2. **可验证视觉**：用户可通过交互画布、原始预览、画板预览和图层属性判断解析是否正确。
@@ -18,7 +20,7 @@ SketchToUI 的架构首先服务于设计上下文质量，而不是先服务于
 
 | 原则 | 决策 |
 | --- | --- |
-| 单一事实来源 | Sketch 原文件和解压内容在对象存储；MySQL 保存业务索引；Redis 只保存短期状态。 |
+| 单一事实来源 | Sketch 原文件和解压内容在本地目录或对象存储；SQLite / MySQL 保存业务索引；内存缓存 / Redis 只保存短期状态。 |
 | 分层读取 | UI 与 MCP 都使用“项目 → 分组 → 画板 → 图层”的渐进读取方式。 |
 | 视觉优先校验 | 原始 `previews/preview.png`、画板 PNG 与 Canvas 共同验证还原质量。 |
 | 权限前置 | 每次对象读取前校验用户、项目、分组和资源归属；Bucket 默认私有。 |
@@ -35,9 +37,9 @@ flowchart LR
     Web["sketchtoui.com\nReact Web 工作台"]
     API["Flask 业务 API"]
     MCP["mcp.sketchtoui.com\nRemote MCP"]
-    DB[("MySQL")]
-    Cache[("Redis")]
-    Storage[("MinIO / OSS\n私有 Bucket")]
+    DB[("SQLite / MySQL")]
+    Cache[("内存 / Redis")]
+    Storage[("本地目录 / MinIO\n私有文件")]
     Mail["SMTP 邮箱服务"]
     Pay["第三方支付\n后续接入"]
 
@@ -108,7 +110,7 @@ flowchart TB
 
     subgraph RemoteMCP["Remote MCP"]
         TokenVerify["Bearer Token 验证"]
-        RateLimit["Redis 限流"]
+        RateLimit["内存 / Redis 限流"]
         DesignSvc["设计上下文服务"]
         PreviewSvc["画板预览服务"]
     end
@@ -132,9 +134,9 @@ flowchart TB
 
 | 存储 | 保存内容 | 生命周期 | 访问规则 |
 | --- | --- | --- | --- |
-| MySQL | 用户、项目索引、MCP Token、后续版本/订阅/订单 | 长期 | 仅后端服务可访问。 |
-| Redis | Session、验证码、重发冷却、导入进度、限流、后续任务队列 | 短期 | 必须设置 TTL；不保存长期业务事实。 |
-| MinIO / OSS | 原始 Sketch、解压数据、图片、Canvas JSON、预览图 | 长期 | 私有 Bucket；先校验项目归属。 |
+| SQLite / MySQL | 用户、项目索引、MCP Token、后续版本/订阅/订单 | 长期 | 仅后端服务可访问。 |
+| 内存缓存 / Redis | Session、验证码、重发冷却、导入进度、限流 | 短期 | 必须设置 TTL；不保存长期业务事实，内存模式按进程隔离。 |
+| 本地目录 / MinIO | 原始 Sketch、解压数据、图片、Canvas JSON、预览图 | 长期 | 私有目录 / Bucket；先校验项目归属。 |
 | 本地临时目录 | 上传文件、解压工作区、解析中间文件 | 短期 | 成功、失败或异常后均清理。 |
 
 推荐对象存储前缀：
@@ -157,9 +159,9 @@ users/{user-id}/projects/{project-id}/
 sequenceDiagram
     participant Browser as React 浏览器
     participant API as Flask API
-    participant Redis as Redis
+    participant Redis as 内存缓存 / Redis
     participant Task as Flask 后台任务池
-    participant Store as MinIO / OSS
+    participant Store as 本地目录 / MinIO
     participant DB as MySQL
 
     Browser->>API: POST /api/projects (.sketch)
@@ -218,11 +220,11 @@ flowchart LR
 sequenceDiagram
     participant AI as Codex / Cursor
     participant MCP as Remote MCP
-    participant Limit as Redis 限流
+    participant Limit as 内存 / Redis 限流
     participant Token as Token 服务
     participant Design as 设计上下文服务
     participant DB as MySQL
-    participant Store as MinIO / OSS
+    participant Store as 本地目录 / MinIO
 
     AI->>MCP: Authorization: Bearer skt_...
     MCP->>Limit: 全局 + Token 频率检查
@@ -277,8 +279,8 @@ flowchart LR
 | ADR-001 | Web 与 API 同一主域名 | 当前前端 API 使用相对路径，降低跨域和 Cookie 复杂度。 |
 | ADR-002 | MCP 使用独立子域名 | 便于 Remote MCP 配置、限流、日志和安全边界。 |
 | ADR-003 | Bucket 默认私有 | Sketch 资源可能含敏感业务信息。 |
-| ADR-004 | Redis 保存短期状态 | Session、验证码、任务状态和限流均天然带 TTL。 |
+| ADR-004 | 内存缓存 / Redis 保存短期状态 | Session、验证码、任务状态和限流均带 TTL；默认内存，多进程共享时选择 Redis。 |
 | ADR-005 | MySQL 保存业务事实 | 用户、项目、Token、版本、订阅和订单必须可迁移和备份。 |
-| ADR-006 | 导入采用受限后台任务池 | 当前单机阶段以最少进程实现异步解析；Redis 保存进度，压力出现后再拆分独立 Worker。 |
+| ADR-006 | 导入采用受限后台任务池 | 当前单机阶段以最少进程实现异步解析；所选缓存保存进度，数据库保存恢复记录，压力出现后再拆分独立 Worker。 |
 | ADR-007 | MCP 采用手工 Token | 当前优先保证可用、隔离和启停管理，不实现 OAuth。 |
 | ADR-008 | 不销售 AI Token | 平台专注设计上下文，外部 AI 负责模型调用。 |

@@ -63,7 +63,7 @@ class ImportHelperTests(unittest.TestCase):
 
     def test_job_lookup_prefers_redis_then_rehydrates_database(self) -> None:
         redis = ImportRedis(json.dumps({"id": "job", "userId": "user", "stage": "running", "progress": 30, "message": "working"}))
-        with patch.object(imports, "get_redis", return_value=redis):
+        with patch.object(imports, "get_cache", return_value=redis):
             self.assertEqual(get_job("job")["progress"], 30)
         redis = ImportRedis()
         database = Mock()
@@ -71,7 +71,7 @@ class ImportHelperTests(unittest.TestCase):
             {"id": "job", "user_id": "user", "project_id": "project", "status": "succeeded", "stage": "complete", "progress": 100, "message": "done", "error_message": None},
             {"id": "project", "name": "Project", "filename": "source.sketch", "group_count": 1, "created_at": "created", "updated_at": "updated", "status": "ready", "current_version_id": "version", "current_version_number": 1},
         ]
-        with patch.object(imports, "get_redis", return_value=redis), patch.object(imports, "get_database", return_value=database):
+        with patch.object(imports, "get_cache", return_value=redis), patch.object(imports, "get_database", return_value=database):
             result = get_job("job")
         self.assertEqual(result["project"]["id"], "project")
         self.assertEqual(result["stage"], "complete")
@@ -85,16 +85,15 @@ class ImportHelperTests(unittest.TestCase):
             {"id": "project", "current_version_id": "version", "status": "ready"},
             {"object_prefix": "users/user/projects/project/versions/version"},
         ]
-        response = SimpleNamespace(read=lambda: b"payload", headers={"Content-Type": "image/png"}, close=Mock(), release_conn=Mock())
-        minio = SimpleNamespace(get_object=lambda *_args: response)
-        with patch.object(imports, "get_database", return_value=database), patch.object(imports, "get_minio", return_value=minio), patch.object(imports, "settings", SimpleNamespace(minio_bucket="bucket")):
+        storage = Mock()
+        storage.read_object.return_value = (b"payload", "image/png")
+        with patch.object(imports, "get_database", return_value=database), patch.object(imports, "get_storage", return_value=storage):
             name = service.object_name("user", "a" * 32, "canvas/manifest.json")
             payload, content_type = service.read_object("user", "a" * 32, "images/icon.png")
         self.assertTrue(name.endswith("canvas/manifest.json"))
         self.assertEqual(payload, b"payload")
         self.assertEqual(content_type, "image/png")
-        response.close.assert_called_once()
-        response.release_conn.assert_called_once()
+        storage.read_object.assert_called_once_with("users/user/projects/project/versions/version/images/icon.png")
         with self.assertRaises(ApiError):
             service.object_name("user", "invalid", "canvas/manifest.json")
         with self.assertRaises(ApiError):
@@ -105,7 +104,7 @@ class ImportHelperTests(unittest.TestCase):
     def test_import_job_lifecycle_processing_and_recovery(self) -> None:
         database = Mock()
         redis = ImportRedis(json.dumps({"id": "job", "userId": "user", "stage": "queued", "progress": 5, "message": "waiting"}))
-        with patch.object(imports, "get_database", return_value=database), patch.object(imports, "get_redis", return_value=redis), patch.object(imports, "iso_now", return_value="now"):
+        with patch.object(imports, "get_database", return_value=database), patch.object(imports, "get_cache", return_value=redis), patch.object(imports, "iso_now", return_value="now"):
             imports.update_job("job", stage="complete", progress=100, message="done", project={"id": "project"})
         self.assertEqual(json.loads(redis.values[imports.job_key("job")])["stage"], "complete")
 
@@ -156,23 +155,22 @@ class ImportHelperTests(unittest.TestCase):
         resume_database = Mock()
         resume_database.all.side_effect = [[{"id": "running", "user_id": "user"}], [{"id": "running"}, {"id": "queued"}]]
         submitted = Mock()
-        with patch.object(imports, "get_database", return_value=resume_database), patch.object(imports, "get_redis", return_value=ImportRedis()), patch.object(imports, "submit_import_job", submitted):
+        with patch.object(imports, "get_database", return_value=resume_database), patch.object(imports, "get_cache", return_value=ImportRedis()), patch.object(imports, "submit_import_job", submitted):
             self.assertEqual(imports.resume_pending_import_jobs(), 1)
         self.assertEqual(submitted.call_count, 2)
 
     def test_upload_project_and_version_operations(self) -> None:
         client = Mock()
-        client.list_objects.return_value = [SimpleNamespace(object_name="prefix/one"), SimpleNamespace(object_name="prefix/two")]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "one.txt").write_text("one", encoding="utf-8")
             (root / "folder").mkdir()
             (root / "folder" / "two.png").write_bytes(b"two")
-            with patch.object(imports, "get_minio", return_value=client), patch.object(imports, "settings", SimpleNamespace(minio_bucket="bucket")):
+            with patch.object(imports, "get_storage", return_value=client):
                 imports.upload_tree(root, "prefix")
                 imports.remove_object_tree("prefix")
-        self.assertEqual(client.fput_object.call_count, 2)
-        self.assertEqual(client.remove_object.call_count, 2)
+        self.assertEqual(client.put_file.call_count, 2)
+        client.delete_prefix.assert_called_once_with("prefix")
 
         project_id = "a" * 32
         database = Mock()
@@ -199,7 +197,7 @@ class ImportHelperTests(unittest.TestCase):
             database = Mock()
             submitted = Mock()
             redis = Mock()
-            with patch.object(imports, "temp_dir_for_job", side_effect=temp_for_job), patch.object(imports, "get_database", return_value=database), patch.object(imports, "get_redis", return_value=redis), patch.object(imports, "submit_import_job", submitted), patch.object(imports, "iso_now", return_value="now"):
+            with patch.object(imports, "temp_dir_for_job", side_effect=temp_for_job), patch.object(imports, "get_database", return_value=database), patch.object(imports, "get_cache", return_value=redis), patch.object(imports, "submit_import_job", submitted), patch.object(imports, "iso_now", return_value="now"):
                 job = service.queue_import("user", "source.sketch", "", io.BytesIO(b"source"), len(b"source"))
             self.assertEqual(job["stage"], "queued")
             self.assertTrue(submitted.called)
@@ -211,7 +209,7 @@ class ImportHelperTests(unittest.TestCase):
                 {"latest_version": 4},
             ]
             submitted = Mock()
-            with patch.object(imports, "temp_dir_for_job", side_effect=temp_for_job), patch.object(imports, "get_database", return_value=database), patch.object(imports, "get_redis", return_value=Mock()), patch.object(imports, "submit_import_job", submitted), patch.object(imports, "iso_now", return_value="now"):
+            with patch.object(imports, "temp_dir_for_job", side_effect=temp_for_job), patch.object(imports, "get_database", return_value=database), patch.object(imports, "get_cache", return_value=Mock()), patch.object(imports, "submit_import_job", submitted), patch.object(imports, "iso_now", return_value="now"):
                 reimport = service.queue_reimport("user", project_id, "next.sketch", io.BytesIO(b"source"), len(b"source"))
             self.assertEqual(reimport["stage"], "queued")
 

@@ -6,15 +6,15 @@
 
 ## 1. 设计目标与数据边界
 
-MySQL 保存可追溯、需要查询和需要迁移的业务事实；Redis 保存带 TTL 的短期状态；MinIO/OSS 保存 Sketch 文件、Canvas JSON、图片和预览等大对象。
+SQLite / MySQL 保存可追溯、需要查询和需要迁移的业务事实；内存缓存 / Redis 保存带 TTL 的短期状态；本地目录 / MinIO 保存 Sketch 文件、Canvas JSON、图片和预览等大对象。默认单机模式无需 Redis、MinIO。
 
 | 数据 | 正确位置 | 不应放入 |
 | --- | --- | --- |
 | 用户、项目、版本、MCP Token、订阅、订单 | MySQL | Redis、对象存储文件名推导。 |
-| 登录 Session、邮箱验证码、重发冷却、限流计数、实时导入进度 | Redis | MySQL 业务表。 |
-| `.sketch` 原文件、解压内容、图片、SVG、Canvas JSON、PNG 预览 | MinIO / OSS | MySQL BLOB、Redis。 |
+| 登录 Session、邮箱验证码、重发冷却、限流计数、实时导入进度 | 内存缓存 / Redis | MySQL 业务表。 |
+| `.sketch` 原文件、解压内容、图片、SVG、Canvas JSON、PNG 预览 | 本地目录 / MinIO | MySQL BLOB、缓存。 |
 
-**明确约束**：邮箱验证码不得创建数据库表；它只存在 Redis，10 分钟后自动过期。MCP Token 原文不得落库；MySQL 仅保存 SHA-256 Hash 和安全前缀。
+**明确约束**：邮箱验证码不得创建数据库表；它只存在所选缓存，10 分钟后自动过期。内存模式重启后 Session、验证码失效；持久导入记录可从数据库恢复。MCP Token 原文不得落库；数据库仅保存 SHA-256 Hash 和安全前缀。
 
 ## 2. 通用字段规范
 
@@ -60,7 +60,7 @@ erDiagram
 | `password_hash` | `TEXT` | 否 | - | - | 密码 Hash，禁止存储明文。 |
 | `created_at` | `VARCHAR(40)` | 否 | - | - | UTC ISO-8601 创建时间。 |
 
-当前 SQLAlchemy/Alembic 逻辑已具备 `email` 和 `username` 唯一约束。邮箱是否验证并不单独落库：注册流程校验 Redis 中验证码成功后才创建用户。
+当前 SQLAlchemy/Alembic 逻辑已具备 `email` 和 `username` 唯一约束。注册流程校验缓存中验证码成功后才创建用户，验证码本身不落库。
 
 `0002` 已追加的用户字段：
 
@@ -73,7 +73,7 @@ erDiagram
 | `last_login_at` | `VARCHAR(40)` | 是 | `NULL` | - | 最近一次密码登录成功时间。 |
 | `updated_at` | `VARCHAR(40)` | 否 | - | - | 用户资料、状态或激活状态更新时间。 |
 
-邮箱验证码仍只存在 Redis；`email_verified` / `email_verified_at` 只保存“账户激活结果”，不保存验证码本身。
+邮箱验证码仍只存在带 TTL 的内存缓存 / Redis；`email_verified` / `email_verified_at` 只保存“账户激活结果”，不保存验证码本身。
 
 ### 4.2 `projects`
 
@@ -176,7 +176,7 @@ users/{user_id}/projects/{project_id}/versions/{project_version_id}/
 
 ### 5.2 `import_jobs`
 
-用途：持久化记录导入任务。Redis 仍用于前端实时进度；此表用于重启恢复、失败排查和历史记录。
+用途：持久化记录导入任务。所选缓存用于前端实时进度；此表用于重启恢复、失败排查和历史记录。
 
 | 字段 | 类型 | 空 | 默认值 | 索引 | 含义 |
 | --- | --- | --- | --- | --- | --- |
@@ -316,7 +316,7 @@ users/{user_id}/projects/{project_id}/versions/{project_version_id}/
 - 删除项目的顺序：标记 `deleting` → 删除对象存储前缀 → 删除/标记版本与任务 → 删除项目行。
 - 删除用户的功能后置；在具备订单、支付、审计后默认应做匿名化或逻辑删除，而不是级联物理删除。
 
-## 8. Redis Key 设计（非 MySQL 表）
+## 8. 缓存 Key 设计（内存 / Redis，非 MySQL 表）
 
 | Key 模式 | TTL | 用途 |
 | --- | --- | --- |
@@ -327,7 +327,7 @@ users/{user_id}/projects/{project_id}/versions/{project_version_id}/
 | `mcp:rate:global:{window}` | 约 60 秒 | MCP 全局限流。 |
 | `mcp:rate:token:{hash}:{window}` | 约 60 秒 | MCP 单 Token 限流。 |
 
-Redis Key 不得包含密码、Token 原文、对象存储密钥或整份 Canvas JSON。
+缓存 Key 不得包含密码、Token 原文、对象存储密钥或整份 Canvas JSON。
 
 ## 9. Alembic 迁移规划
 
@@ -346,6 +346,6 @@ Redis Key 不得包含密码、Token 原文、对象存储密钥或整份 Canvas
 
 ## 10. 当前阶段的数据库实施结论
 
-`0002_core_project_versions` 已实现。它支撑用户状态、重新导入、版本标识、存储成本观察和 MCP 读取当前版本；上线环境在部署代码前必须先执行数据库升级。当前使用 Flask 进程内的受限后台任务池，Redis 仅保存导入进度；单机压力上升后再引入独立 Redis Worker 与自动重试策略。
+`0002_core_project_versions` 已实现。它支撑用户状态、重新导入、版本标识、存储成本观察和 MCP 读取当前版本；上线环境在部署代码前必须先执行数据库升级。当前使用 Flask 进程内的受限后台任务池，所选缓存保存实时导入进度；单机压力上升后再引入独立 Redis Worker 与自动重试策略。
 
 `0003_billing` 必须等第三方支付供应商确定后再实现；在此之前不创建假支付表、不硬编码供应商 SDK，也不把会员判断散落在控制器和 MCP Tool 中。

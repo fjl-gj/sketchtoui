@@ -17,7 +17,7 @@ Import `.sketch` files into a React workspace, inspect artboards and layers, and
 - 邮箱注册、验证与登录，按用户管理项目。
 - 导入 `.sketch` 文件，在后台解析页面分组、画板与图层。
 - React Canvas 画布支持缩放、平移、图层选择和属性查看。
-- 将原始文件、图片和解析结果保存至 MinIO。
+- 将原始文件、图片和解析结果保存至本地目录，也可选择 MinIO。
 - 创建、禁用和撤销个人 MCP Token，通过只读工具和 `sketchtoui://` Resource 读取设计数据。
 - 获取画板预览、设计规范、重复组件候选，以及文本布局和图层重叠分析。
 
@@ -28,8 +28,8 @@ flowchart LR
     Design["Sketch 文件"] --> Web["浏览器工作台"]
     Web --> API["Flask API 与后台解析"]
     API --> DB["SQLite / MySQL：账号与项目索引"]
-    API --> Cache["Redis：会话与任务进度"]
-    API --> Storage["MinIO：设计、图层数据与图片"]
+    API --> Cache["内存 / Redis：会话与任务进度"]
+    API --> Storage["本地目录 / MinIO：设计、图层数据与图片"]
     Client["AI 客户端 + 个人 Token"] --> MCP["只读 Remote MCP"]
     MCP --> DB
     MCP --> Cache
@@ -44,10 +44,10 @@ flowchart LR
 | Web API | Python、Flask |
 | Remote MCP | MCP Python SDK、Streamable HTTP、Uvicorn |
 | 数据库 | 本地 SQLite / MySQL，Alembic 迁移 |
-| 缓存与会话 | Redis |
-| 文件存储 | MinIO |
+| 缓存与会话 | 默认进程内内存，可选 Redis |
+| 文件存储 | 默认本地目录，可选 MinIO |
 
-准备 Python 3.12、Node.js 22.12 或更新版本，以及可访问的 Redis 和 MinIO。Redis 和 MinIO 是启动必需的依赖；本仓库不包含它们的数据和访问凭据。
+准备 Python 3.12、Node.js 22.12 或更新版本即可。默认使用 SQLite、内存缓存和本地文件存储，无需启动 Redis、MinIO；需要共享缓存或对象存储时再开启对应配置。
 
 ## 快速开始（Windows PowerShell）
 
@@ -67,11 +67,14 @@ Copy-Item .env.example .env
 | 配置 | 说明 |
 | --- | --- |
 | `DATABASE_DSN` | 本地可保留 `sqlite:///data/workspace/sketch.db`；MySQL 使用 `mysql://user:password@host:3306/sketchtoui` |
-| `REDIS_URL` | 可访问的 Redis 地址 |
-| `MINIO_ENDPOINT` | MinIO 的 `host:port`，不包含协议前缀 |
-| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | 你自己的 MinIO 访问凭据 |
-| `MINIO_BUCKET` | 保存设计文件的存储桶；应用启动时会检查并在不存在时创建 |
-| `EMAIL_DELIVERY` | 本地调试改为 `console`，从后端输出读取注册验证码；正式环境使用 `smtp` 并配置 `SMTP_*` |
+| `CACHE_BACKEND` | 默认 `memory`；改为 `redis` 时需填写 `REDIS_URL` |
+| `STORAGE_BACKEND` | 默认 `local`；改为 `minio` 时需填写 `MINIO_ENDPOINT`、访问密钥和 `MINIO_BUCKET` |
+| `LOCAL_STORAGE_DIR` | 默认 `data/storage`，相对仓库根目录；也支持绝对目录，Web 与 MCP 必须使用同一目录 |
+| `EMAIL_DELIVERY` | 默认 `console`，从后端输出读取注册验证码；正式环境使用 `smtp` 并配置 `SMTP_*` |
+
+内存缓存包含登录 Session、邮箱验证码、发送冷却、实时导入进度和 MCP 限流计数，具有 TTL。重启 Web 服务后需要重新登录并重新获取未使用的验证码；项目索引、导入记录和 MCP Token 在数据库中，文件在本地持久保存。默认模式适合单个 Web 进程（可多线程）；MCP 使用独立进程内的限流计数。多 Web Worker / 多实例需要使用 Redis 共享会话与全局限流，本地存储则需要共享持久卷或切换 MinIO。
+
+已有 `.env` 未填写后端选择项时，有 `REDIS_URL` 会继续使用 Redis，有 `MINIO_ENDPOINT` 会继续使用 MinIO。要强制使用内存和本地文件，请显式设置 `CACHE_BACKEND=memory`、`STORAGE_BACKEND=local`。切换存储不会搬迁旧文件，切换前应迁移对象并保留原有 `users/...` 目录结构，或继续使用原存储。显式选择外部服务后连接失败会报错，不会自动切换存储。
 
 初始化一个新数据库：
 
@@ -104,7 +107,7 @@ New-Item -ItemType Directory -Path data/workspace -Force | Out-Null
 .\stop-services.cmd
 ```
 
-启停脚本只管理本项目的三个应用进程，适用于 Windows；Redis 和 MinIO 需要单独启动。日志位于 `data/tmp/services/`，包括 `backend.stdout.log`、`backend.stderr.log` 和 MCP 日志。使用 `console` 邮件模式时，注册验证码写入后端输出日志。
+启停脚本只管理本项目的三个应用进程，适用于 Windows；只有选择 Redis 或 MinIO 后端时才需要单独启动它们。日志位于 `data/tmp/services/`，包括 `backend.stdout.log`、`backend.stderr.log` 和 MCP 日志。使用 `console` 邮件模式时，注册验证码写入后端输出日志。
 
 首次使用时在页面注册自己的账号，导入自己的 `.sketch` 文件。仓库不提供默认账号、密码或私人设计样本。
 
@@ -167,7 +170,7 @@ stop-services.cmd
 
 部署前安装依赖、构建前端、配置 `.env` 并执行数据库迁移。Web 与 MCP 需要独立的进程管理；正式部署使用 WSGI 服务提供 Flask 应用，并通过 HTTPS 反向代理暴露 Web 和 MCP。
 
-如果进程不断退出且端口没有监听，先检查数据库、Redis 与 MinIO 的连接和权限。应用会在启动时连接这些依赖；MinIO 的 `/minio/health/live` 可以检查存储服务是否在线。Web `/api/health` 返回应用配置摘要，不会逐次探测所有外部依赖；完整验收还需要测试登录、导入及图片读取。
+如果进程不断退出且端口没有监听，先检查数据库迁移和所选后端的连接或目录权限。只有启用外部后端时，启动才会连接 Redis 或 MinIO；MinIO 的 `/minio/health/live` 可以检查存储服务是否在线。Web `/api/health` 返回 `databaseBackend`、`cacheBackend`、`storageBackend` 配置摘要，不会逐次探测所有依赖；完整验收还需要测试登录、导入及图片读取。备份时同时保存数据库和 `LOCAL_STORAGE_DIR`，本地存储通过已有鉴权 API 读取，不应直接暴露为静态目录。
 
 ## 更多文档
 

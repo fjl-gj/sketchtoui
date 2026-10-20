@@ -9,7 +9,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from ..common.extensions import get_redis
+from ..common.extensions import get_cache
 
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ class McpRateLimitMiddleware(BaseHTTPMiddleware):
                 keys_and_limits.append((f"mcp:rate:token:{token_id}:{window}", self.per_token_limit))
         if not keys_and_limits:
             return True, retry_after
-        pipeline = get_redis().pipeline()
+        pipeline = get_cache().pipeline()
         for key, _limit in keys_and_limits:
             pipeline.incr(key)
             pipeline.expire(key, retry_after + 1)

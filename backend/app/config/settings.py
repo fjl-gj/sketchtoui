@@ -32,6 +32,7 @@ def env_bool(name: str, default: bool = False) -> bool:
 class Settings:
     database_dsn: str = os.getenv("DATABASE_DSN") or os.getenv("MYSQL_DSN", "")
     redis_url: str = os.getenv("REDIS_URL", "")
+    cache_backend: str = os.getenv("CACHE_BACKEND", "").strip().lower() or ("redis" if redis_url else "memory")
     app_base_url: str = os.getenv("APP_BASE_URL", "http://127.0.0.1:8123").rstrip("/")
     frontend_origins: tuple[str, ...] = tuple(
         origin.strip().rstrip("/")
@@ -58,6 +59,8 @@ class Settings:
     minio_secret_key: str = os.getenv("MINIO_SECRET_KEY", "")
     minio_bucket: str = os.getenv("MINIO_BUCKET", "")
     minio_secure: bool = env_bool("MINIO_SECURE", False)
+    storage_backend: str = os.getenv("STORAGE_BACKEND", "").strip().lower() or ("minio" if minio_endpoint else "local")
+    local_storage_dir: str = os.getenv("LOCAL_STORAGE_DIR", "data/storage")
     mcp_host: str = os.getenv("MCP_HOST", "127.0.0.1")
     mcp_port: int = int(os.getenv("MCP_PORT", "8124"))
     mcp_public_url: str = os.getenv("MCP_PUBLIC_URL", "http://127.0.0.1:8124/mcp").rstrip("/")

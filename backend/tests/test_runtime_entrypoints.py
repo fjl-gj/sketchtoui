@@ -54,23 +54,26 @@ class RuntimeEntrypointTests(unittest.TestCase):
         settings = SimpleNamespace(
             database_dsn="sqlite:///data.db", redis_url="redis://localhost", minio_endpoint="localhost:9000",
             minio_access_key="key", minio_secret_key="secret", minio_bucket="bucket", minio_secure=False,
+            cache_backend="redis", storage_backend="minio",
         )
-        previous = extensions.database, extensions.redis_client, extensions.minio_client
+        previous = extensions.database, extensions.cache_client, extensions.storage_client
         try:
             with patch.object(extensions, "settings", settings), patch.object(extensions, "Database", return_value=database), patch.object(extensions, "Redis", SimpleNamespace(from_url=Mock(return_value=redis))), patch.object(extensions, "Minio", return_value=minio):
-                extensions.database = extensions.redis_client = extensions.minio_client = None
+                extensions.database = extensions.cache_client = extensions.storage_client = None
                 extensions.initialize_extensions()
                 self.assertIs(extensions.get_database(), database)
-                self.assertIs(extensions.get_redis(), redis)
-                self.assertIs(extensions.get_minio(), minio)
-            extensions.database = extensions.redis_client = extensions.minio_client = None
+                self.assertIs(extensions.get_cache(), redis)
+                self.assertIs(extensions.get_storage().client, minio)
+                redis.ping.assert_called_once()
+                minio.make_bucket.assert_called_once_with("bucket")
+            extensions.database = extensions.cache_client = extensions.storage_client = None
             with self.assertRaises(RuntimeError):
                 extensions.get_database()
             incomplete = SimpleNamespace(database_dsn="", redis_url="", minio_endpoint="", minio_access_key="", minio_secret_key="", minio_bucket="", minio_secure=False)
             with patch.object(extensions, "settings", incomplete), self.assertRaises(RuntimeError):
                 extensions.initialize_extensions()
         finally:
-            extensions.database, extensions.redis_client, extensions.minio_client = previous
+            extensions.database, extensions.cache_client, extensions.storage_client = previous
 
     def test_command_entrypoints(self) -> None:
         flask_app = Mock()

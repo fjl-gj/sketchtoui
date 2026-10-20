@@ -15,7 +15,7 @@ from typing import Any
 from flask import Request, Response
 
 from ..common.errors import ApiError
-from ..common.extensions import get_database, get_redis
+from ..common.extensions import get_database, get_cache
 from ..config.settings import settings
 
 
@@ -89,7 +89,7 @@ def validate_email_and_username(payload: dict[str, Any]) -> tuple[str, str]:
 
 
 def send_verification_email(email: str, username: str) -> None:
-    redis = get_redis()
+    redis = get_cache()
     if not redis.set(cooldown_key(email), "1", nx=True, ex=RESEND_COOLDOWN_SECONDS):
         raise ApiError("验证码已发送，请 60 秒后再试", 429)
     code = f"{secrets.randbelow(1_000_000):06d}"
@@ -121,7 +121,7 @@ def send_verification_email(email: str, username: str) -> None:
 def verify_registration_code(email: str, code: str) -> None:
     if not re.fullmatch(r"\d{6}", code.strip()):
         raise ApiError("请输入 6 位数字验证码")
-    redis = get_redis()
+    redis = get_cache()
     record_json = redis.get(verification_key(email))
     if not record_json:
         raise ApiError("验证码无效或已过期", 404)
@@ -139,7 +139,7 @@ def verify_registration_code(email: str, code: str) -> None:
 
 def current_user(request: Request, require_verified: bool = False) -> dict[str, Any]:
     session_id = request.cookies.get(SESSION_COOKIE)
-    user_id = get_redis().get(session_key(session_id)) if session_id else None
+    user_id = get_cache().get(session_key(session_id)) if session_id else None
     if not user_id:
         raise ApiError("请先登录", 401)
     user = get_database().one(
@@ -149,7 +149,7 @@ def current_user(request: Request, require_verified: bool = False) -> dict[str, 
     if not user:
         raise ApiError("登录已过期，请重新登录", 401)
     if user["status"] != "active":
-        get_redis().delete(session_key(session_id))
+        get_cache().delete(session_key(session_id))
         raise ApiError("该账户已被禁用", 403)
     if require_verified and not bool(user["email_verified"]):
         raise ApiError("请先完成邮箱验证", 403)
@@ -158,7 +158,7 @@ def current_user(request: Request, require_verified: bool = False) -> dict[str, 
 
 def issue_session(user_id: str) -> str:
     session_id = secrets.token_urlsafe(48)
-    get_redis().set(session_key(session_id), user_id, ex=settings.session_days * 86400)
+    get_cache().set(session_key(session_id), user_id, ex=settings.session_days * 86400)
     return session_id
 
 
